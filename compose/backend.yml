@@ -1,41 +1,28 @@
-# Base configuration for all backend services
-x-backend-base: &backend-base
-  image: ${BACKEND_IMAGE}
+# Shared configuration for all backend services
+x-backend-defaults: &backend-defaults
+  image: ${BACKEND_IMAGE:-ecodex/backend:latest}
   restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Configuration for services that need database connectivity
+x-backend-with-db: &backend-with-db
+  <<: *backend-defaults
   depends_on:
-    ipfs: { condition: service_healthy }
-    postgres: { condition: service_healthy }
+    postgres:
+      condition: service_healthy
+    ipfs:
+      condition: service_healthy
   env_file:
-    - ../config/backend/api.env
-
-# Configuration for services that need database migration
-x-backend-migration: &backend-migration
-  <<: *backend-base
-  depends_on:
-    ipfs: { condition: service_healthy }
-    postgres: { condition: service_healthy }
-
-# Configuration for services that need database to be ready
-x-backend-ready: &backend-ready
-  <<: *backend-migration
-  depends_on:
-    ipfs: { condition: service_healthy }
-    postgres: { condition: service_healthy }
-    seed: { condition: service_completed_successfully }
-
-# Configuration for public-facing services
-x-backend-public: &backend-public
-  <<: *backend-ready
-  depends_on:
-    ipfs: { condition: service_healthy }
-    postgres: { condition: service_healthy }
-    traefik: { condition: service_started }
+    - ../config/backend/backend.env
 
 services:
-  # API service with high availability
+  # Main API service
   api:
-    <<: *backend-public
-    command: node app/cmd/cmd.js api
+    <<: *backend-with-db
     deploy:
       replicas: ${API_REPLICAS}
       update_config:
@@ -44,20 +31,13 @@ services:
         order: start-first
       restart_policy:
         condition: on-failure
-      # resources:
-      #   limits:
-      #     cpus: '2'
-      #     memory: 2G
-      #   reservations:
-      #     cpus: '0.5'
-      #     memory: 512M
     environment:
-      OTEL_SERVICE_NAME: pfc-api
+      RUN_MODE: api
     labels:
       - traefik.enable=true
       - traefik.http.routers.pfc-api.rule=Host(`${API_DOMAIN}`)
       - traefik.http.routers.pfc-api.entrypoints=websecure
-      - traefik.http.services.pfc-api.loadbalancer.server.port=5100
+      - traefik.http.services.pfc-api.loadbalancer.server.port=3000
       - traefik.http.routers.pfc-api.tls=true
       - traefik.http.routers.pfc-api.tls.certresolver=letsencrypt
       # Security and rate limiting
@@ -79,16 +59,28 @@ services:
       - traefik.http.middlewares.api-cors.headers.accessControlMaxAge=86400
       - traefik.http.middlewares.api-cors.headers.addVaryHeader=true
 
-  # Referral service
-  referral:
-    <<: *backend-ready
-    command: node app/cmd/cmd.js referral
+  # Worker service
+  worker:
+    <<: *backend-with-db
     deploy:
       replicas: ${SERVICE_REPLICAS}
       update_config:
         parallelism: 1
         order: start-first
     environment:
-      OTEL_SERVICE_NAME: pfc-referral
+      RUN_MODE: worker
+    labels:
+      - traefik.enable=false
+
+  # Launchpad service
+  launchpad:
+    <<: *backend-with-db
+    deploy:
+      replicas: ${SERVICE_REPLICAS}
+      update_config:
+        parallelism: 1
+        order: start-first
+    environment:
+      RUN_MODE: launchpad
     labels:
       - traefik.enable=false
